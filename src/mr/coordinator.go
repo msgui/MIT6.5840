@@ -14,6 +14,7 @@ import "net/http"
 
 type Coordinator struct {
 	// Your definitions here.
+	IsDone      bool
 	Count       Count
 	Reduces     []ReduceTask
 	FileTasks   []FileTask
@@ -134,10 +135,8 @@ func (c *Coordinator) MapFetch(ags *Args, res *Result) error {
 }
 
 func (c *Coordinator) DoneRPC(ags *Args, res *Result) error {
-	done := c.Done()
-	bytes, err := json.Marshal(done)
-	res.Json = string(bytes)
-	return err
+	res.Json = parse2Json(c.IsDone)
+	return nil
 }
 
 func (c *Coordinator) FinishFileTask(ags *Args, res *Result) error {
@@ -233,7 +232,6 @@ func (c *Coordinator) Done() bool {
 	count := &c.Count
 	timep := count.Timemap
 	isDone := count.Inc == count.Dec
-	fmt.Printf("待处理任务数：%d, 已处理任务数：%d, 总任务数：%d \n", count.Inc-count.Dec, count.Dec, count.Inc)
 
 	for i := range c.FileTasks {
 		fileTask := &c.FileTasks[i]
@@ -242,9 +240,17 @@ func (c *Coordinator) Done() bool {
 			return false
 		}
 	}
-	time.Sleep(5 * time.Second)
+	time.Sleep(3 * time.Second)
 	isDone = timep == count.Timemap
 	return isDone
+}
+
+func (c *Coordinator) PrintTimer() bool {
+	for {
+		count := &c.Count
+		fmt.Printf("待处理任务数：%d, 已处理任务数：%d, 总任务数：%d \n", count.Inc-count.Dec, count.Dec, count.Inc)
+		time.Sleep(time.Second)
+	}
 }
 
 // create a Coordinator.
@@ -273,16 +279,17 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 	reduceLocks := make([]sync.Mutex, nReduce)
 	fileLocks := make([]sync.Mutex, len(fileTasks))
-	m := Coordinator{Count{
-		Inc:     0,
-		Dec:     0,
-		Timemap: 0,
-	},
+	m := Coordinator{false,
+		Count{
+			Inc:     0,
+			Dec:     0,
+			Timemap: 0},
 		reduceTasks, fileTasks,
 		fileLocks, reduceLocks,
 		sync.Mutex{}, sync.Mutex{}}
 	m.server()
 	go m.ReduceTimer()
 	go m.MapTimer()
+	go m.PrintTimer()
 	return &m
 }

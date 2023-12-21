@@ -20,13 +20,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	m := mr.MakeCoordinator(os.Args[1:], 10)
+	m := mr.MakeCoordinator(os.Args[1:], 100)
 	for m.Done() == false {
 		time.Sleep(time.Second)
 	}
 	count := &m.Count
 	fmt.Printf("=== 待处理任务数：%d, 已处理任务数：%d, 总任务数：%d \n", count.Inc-count.Dec, count.Dec, count.Inc)
 	fmt.Println("================ Done ================")
-
+	m.IsDone = true
 	time.Sleep(time.Second)
 }
