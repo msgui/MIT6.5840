@@ -195,6 +195,7 @@ func reduceExecute() {
 	res := Result{}
 	ags := Args{}
 	pid := os.Getpid()
+	oname := "workerOut/mr-out-" + strconv.Itoa(pid)
 	for {
 		ags.Json = parse2Json(pid)
 		call("Coordinator.ReduceFetch", &ags, &res)
@@ -204,23 +205,19 @@ func reduceExecute() {
 		}
 		var reduceTask ReduceTask
 		parse2Obj(res.Json, &reduceTask)
-		oname := "mr-out-" + strconv.Itoa(pid)
 		output := reduceFunc(reduceTask.Key, reduceTask.Values)
-		ags.Json = parse2Json(reduceTask)
+		ags.Json = res.Json
 		call("Coordinator.ReduceEsc", &ags, &res)
 		var f bool
 		parse2Obj(res.Json, &f)
 		if f {
-			ofile, _ := os.OpenFile(oname, os.O_WRONLY|os.O_CREATE|os.O_APPEND,
-				0644)
+			ofile, _ := os.OpenFile(oname, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 			fmt.Fprintf(ofile, "%v %v\n", reduceTask.Key, output)
-			//fmt.Printf("%s %s \n", reduceTask.Key, output)
 		} else {
 			fmt.Errorf("Pid:%s 当前worker")
 		}
 		res.Json = ""
 		ags.Json = ""
-		time.Sleep(0)
 	}
 }
 

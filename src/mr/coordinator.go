@@ -41,16 +41,15 @@ func (c *Coordinator) ReduceEsc(ags *Args, res *Result) error {
 	parse2Obj(ags.Json, &reduceTask)
 	i := reduceTask.I
 	lock := &c.ReduceLocks[i]
-	lock.Lock()
 	rt := &c.Reduces[i]
-	if rt.Pid == reduceTask.Pid && rt.StartTime != -2 {
+	lock.Lock()
+	b := rt.Pid == reduceTask.Pid && rt.StartTime != -2
+	if b {
 		rt.StartTime = -2
-		c.Dec() //Count--
-		res.Json = parse2Json(true)
-	} else {
-		res.Json = parse2Json(false)
+		c.Dec() //Count--*
 	}
 	lock.Unlock()
+	res.Json = parse2Json(b)
 	return nil
 }
 
@@ -62,17 +61,14 @@ func (c *Coordinator) ReduceFetch(ags *Args, res *Result) error {
 		lock := &c.ReduceLocks[i]
 
 		if reduceTask.StartTime == -1 {
-			lock.Lock()
+			if !lock.TryLock() {
+				continue
+			}
 			if reduceTask.StartTime == -1 {
 				reduceTask.Pid = pid
 				reduceTask.StartTime = time.Now().UnixNano()
-				bytes, err := json.Marshal(reduceTask)
-				if err != nil {
-					lock.Unlock()
-					return err
-				}
-				res.Json = string(bytes)
 				lock.Unlock()
+				res.Json = parse2Json(reduceTask)
 				break
 			}
 			lock.Unlock()
@@ -115,7 +111,9 @@ func (c *Coordinator) MapFetch(ags *Args, res *Result) error {
 		fileTask := &c.FileTasks[i]
 		lock := &c.FileLocks[i]
 		if fileTask.StartTime == -1 {
-			lock.Lock()
+			if !lock.TryLock() {
+				continue
+			}
 			if fileTask.StartTime == -1 {
 				fileTask.I = i
 				fileTask.Pid = pid
