@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"container/list"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -51,7 +52,13 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 	mapFunc = mapf
 	reduceFunc = reducef
-
+	//nReduce := getNReduce()
+	flistlen = 1
+	flists = make([]list.List, flistlen)
+	fLocks = make([]sync.Mutex, flistlen)
+	for i := range flists {
+		go flistExecute(&flists[i], &fLocks[i])
+	}
 	go mapExecute()
 	go reduceExecute()
 
@@ -59,48 +66,12 @@ func Worker(mapf func(string, string) []KeyValue,
 		fmt.Printf("=== 发送成功: %d, 发送失败：%d, 任务总数 %d\n", done, sum-done, sum)
 		time.Sleep(time.Second)
 	}
-	time.Sleep(time.Second)
 	fmt.Println("================ Done ================")
-	fmt.Printf("=== 发送成功: %d, 发送失败：%d, 任务总数 %d\n", done, sum-done, sum)
-	defer func() {
-		ofile, _ := os.OpenFile("failTasks", os.O_WRONLY|os.O_CREATE|os.O_APPEND,
-			0644)
-		fmt.Fprintf(ofile, "==== 开始打印发送失败的KV, len(fmap): %d \n")
-		fmap.Range(func(key, value any) bool {
-			fmt.Printf("%s %s \n", key, value)
-			_, err := fmt.Fprintf(ofile, "%v %v \n", key, value)
-			return err == nil
-		})
-		ofile.Close()
-	}()
 }
 
 // example function to show how to make an RPC call to the coordinator.
 //
 // the RPC argument and reply types are defined in rpc.go.
-func CallExample() {
-
-	// declare an argument structure.
-	args := ExampleArgs{}
-
-	// fill in the argument(s).
-	args.X = 99
-
-	// declare a reply structure.
-	reply := ExampleReply{}
-
-	// send the RPC request, wait for the reply.
-	// the "Coordinator.Example" tells the
-	// receiving server that we'd like to call
-	// the Example() method of struct Coordinator.
-	ok := call("Coordinator.Example", &args, &reply)
-	if ok {
-		// reply.Y should be 100.
-		fmt.Printf("reply.Y %v\n", reply.Y)
-	} else {
-		fmt.Printf("call failed!\n")
-	}
-}
 func Done() bool {
 	ags := Args{}
 	res := Result{}
@@ -110,10 +81,50 @@ func Done() bool {
 	return done
 }
 
+var flistlen int
 var done int
 var sum int
 var dlock sync.Mutex = sync.Mutex{}
-var fmap sync.Map = sync.Map{}
+var flists []list.List
+var fLocks []sync.Mutex
+
+func getNReduce() int {
+	ags := Args{}
+	res := Result{}
+	call("Coordinator.GetNReduce", &ags, &res)
+	var n int
+	parse2Obj(res.Json, &n)
+	return n
+}
+
+func flistExecute(flist *list.List, flock *sync.Mutex) {
+	args := Args{}
+	res := Result{}
+	for {
+		flock.Lock()
+		front := flist.Front()
+		if front == nil {
+			flock.Unlock()
+			continue
+		}
+		task := front.Value.(ReduceTask)
+		args.Json = parse2Json(task)
+		flist.Remove(front)
+		call("Coordinator.MapPut", &args, &res)
+		var f bool
+		parse2Obj(res.Json, &f)
+		if f {
+			dlock.Lock()
+			done++
+			dlock.Unlock()
+		} else {
+			flist.PushBack(task)
+		}
+		flock.Unlock()
+		args.Json = ""
+		res.Json = ""
+	}
+}
 
 func mapExecute() {
 	// send the RPC request, wait for the reply.
@@ -150,37 +161,22 @@ func mapExecute() {
 				values = append(values, kva[k].Value)
 			}
 			reduceTask := ReduceTask{
-				I:         -1,
+				I:         ihash(kv.Key),
 				Pid:       pid,
 				Key:       kv.Key,
 				Values:    values,
 				StartTime: -1,
 			}
-			ags.Json = parse2Json(reduceTask)
 			sum++
-			go func(a Args, reduceTask ReduceTask) {
-				r := Result{}
-				parse2Obj(a.Json, &r)
-				for {
-					call("Coordinator.MapPut", &a, &r)
-					var f bool
-					parse2Obj(r.Json, &f)
-					if f {
-						dlock.Lock()
-						done++
-						dlock.Unlock()
-						//fmap.Delete(reduceTask.Key)
-						return
-					}
-					time.Sleep(time.Millisecond)
-					//v, _ := fmap.Load(reduceTask.Key)
-					//if v == nil {
-					//	fmap.Store(reduceTask.Key, len(reduceTask.Values))
-					//}
-				}
-			}(ags, reduceTask)
+			go func(rt ReduceTask) {
+				call("Coordinator.SumInc", &ags, &res)
+				flist := &flists[rt.I%flistlen]
+				flcok := &fLocks[rt.I%flistlen]
+				flcok.Lock()
+				flist.PushBack(rt)
+				flcok.Unlock()
+			}(reduceTask)
 			i = j
-			time.Sleep(10)
 		}
 		ags.Json = parse2Json(fileTask)
 		call("Coordinator.FinishFileTask", &ags, &res)
@@ -195,7 +191,6 @@ func reduceExecute() {
 	res := Result{}
 	ags := Args{}
 	pid := os.Getpid()
-	oname := "workerOut/mr-out-" + strconv.Itoa(pid)
 	for {
 		ags.Json = parse2Json(pid)
 		call("Coordinator.ReduceFetch", &ags, &res)
@@ -211,6 +206,7 @@ func reduceExecute() {
 		var f bool
 		parse2Obj(res.Json, &f)
 		if f {
+			oname := "mr-out-" + strconv.Itoa(reduceTask.I+1)
 			ofile, _ := os.OpenFile(oname, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 			fmt.Fprintf(ofile, "%v %v\n", reduceTask.Key, output)
 		} else {

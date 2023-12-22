@@ -2,10 +2,10 @@
 
 
 
-rm workerOut/mr-out-*
+rm mr-out-*
 go build -buildmode=plugin ../mrapps/wc.go
 
-go run mrsequential.go wc.so pg-*.txt
+go run mrsequential.go wc.so a.txt
 
 
 for ((i=1;i<=3;i++))

@@ -14,6 +14,7 @@ import "net/http"
 
 type Coordinator struct {
 	// Your definitions here.
+	Sum         int
 	IsDone      bool
 	Count       Count
 	Reduces     []ReduceTask
@@ -22,6 +23,7 @@ type Coordinator struct {
 	ReduceLocks []sync.Mutex
 	Cinc        sync.Mutex
 	Cdec        sync.Mutex
+	Slock       sync.Mutex
 }
 
 type Count struct {
@@ -35,7 +37,19 @@ type Count struct {
 // an example RPC handler.
 //
 // the RPC argument and reply types are defined in rpc.go.
-//
+func (c *Coordinator) SumInc(ags *Args, res *Result) error {
+	var add int
+	parse2Obj(ags.Json, &add)
+	c.Slock.Lock()
+	c.Sum++
+	c.Slock.Unlock()
+	return nil
+}
+
+func (c *Coordinator) GetNReduce(ags *Args, res *Result) error {
+	res.Json = parse2Json(len(c.Reduces))
+	return nil
+}
 
 func (c *Coordinator) ReduceEsc(ags *Args, res *Result) error {
 	var reduceTask ReduceTask
@@ -80,17 +94,15 @@ func (c *Coordinator) ReduceFetch(ags *Args, res *Result) error {
 
 func (c *Coordinator) MapPut(ags *Args, res *Result) error {
 	var reduceTask ReduceTask
-	err := json.Unmarshal([]byte(ags.Json), &reduceTask)
-	index := ihash(reduceTask.Key) % len(c.Reduces)
+	parse2Obj(ags.Json, &reduceTask)
+	index := reduceTask.I % len(c.Reduces)
 	lock := &c.ReduceLocks[index]
 	task := &c.Reduces[index]
 
-	if task.StartTime != -2 {
+	if task.StartTime != -2 || !lock.TryLock() {
 		res.Json = parse2Json(false)
-		return err
+		return nil
 	}
-	lock.Lock()
-	defer lock.Unlock()
 	if task.StartTime == -2 {
 		task.I = index
 		task.Pid = -1
@@ -102,7 +114,8 @@ func (c *Coordinator) MapPut(ags *Args, res *Result) error {
 	} else {
 		res.Json = parse2Json(false)
 	}
-	return err
+	lock.Unlock()
+	return nil
 }
 
 func (c *Coordinator) MapFetch(ags *Args, res *Result) error {
@@ -166,8 +179,10 @@ func (c *Coordinator) ReduceTimer() {
 			if timeOut(reduceTask.StartTime) {
 				go func() {
 					lock.Lock()
-					reduceTask.Pid = -1
-					reduceTask.StartTime = -1
+					if timeOut(reduceTask.StartTime) {
+						reduceTask.Pid = -1
+						reduceTask.StartTime = -1
+					}
 					lock.Unlock()
 				}()
 			}
@@ -240,15 +255,16 @@ func (c *Coordinator) Done() bool {
 			return false
 		}
 	}
-	time.Sleep(3 * time.Second)
-	isDone = timep == count.Timemap
+	time.Sleep(100 * time.Millisecond)
+	isDone = c.Count.Timemap == timep
 	return isDone
 }
 
 func (c *Coordinator) PrintTimer() bool {
 	for {
 		count := &c.Count
-		fmt.Printf("待处理任务数：%d, 已处理任务数：%d, 总任务数：%d \n", count.Inc-count.Dec, count.Dec, count.Inc)
+		fmt.Printf("待处理任务数：%d, 已处理任务数：%d, 总任务数：%d , Sum: %d \n",
+			count.Inc-count.Dec, count.Dec, count.Inc, c.Sum)
 		time.Sleep(time.Second)
 	}
 }
@@ -279,14 +295,16 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 	reduceLocks := make([]sync.Mutex, nReduce)
 	fileLocks := make([]sync.Mutex, len(fileTasks))
-	m := Coordinator{false,
+	m := Coordinator{
+		0,
+		false,
 		Count{
 			Inc:     0,
 			Dec:     0,
 			Timemap: 0},
 		reduceTasks, fileTasks,
 		fileLocks, reduceLocks,
-		sync.Mutex{}, sync.Mutex{}}
+		sync.Mutex{}, sync.Mutex{}, sync.Mutex{}}
 	m.server()
 	go m.ReduceTimer()
 	go m.MapTimer()
