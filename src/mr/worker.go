@@ -53,19 +53,20 @@ func Worker(mapf func(string, string) []KeyValue,
 	mapFunc = mapf
 	reduceFunc = reducef
 	//nReduce := getNReduce()
-	flistlen = 1
-	flists = make([]list.List, flistlen)
-	fLocks = make([]sync.Mutex, flistlen)
-	for i := range flists {
-		go flistExecute(&flists[i], &fLocks[i])
-	}
+	flistlen = 2
+	flists = make([]*list.List, flistlen)
+	flists[0] = list.New()
+	flists[1] = list.New()
+	fLock = sync.Mutex{}
 	go mapExecute()
 	go reduceExecute()
+	go flistExecute()
 
 	for Done() == false {
 		fmt.Printf("=== 发送成功: %d, 发送失败：%d, 任务总数 %d\n", done, sum-done, sum)
 		time.Sleep(time.Second)
 	}
+	fmt.Printf("=== 发送成功: %d, 发送失败：%d, 任务总数 %d\n", done, sum-done, sum)
 	fmt.Println("================ Done ================")
 }
 
@@ -85,8 +86,8 @@ var flistlen int
 var done int
 var sum int
 var dlock sync.Mutex = sync.Mutex{}
-var flists []list.List
-var fLocks []sync.Mutex
+var flists []*list.List
+var fLock sync.Mutex
 
 func getNReduce() int {
 	ags := Args{}
@@ -97,14 +98,14 @@ func getNReduce() int {
 	return n
 }
 
-func flistExecute(flist *list.List, flock *sync.Mutex) {
+func flistExecute() {
 	args := Args{}
 	res := Result{}
 	for {
-		flock.Lock()
+		flist := flists[0]
 		front := flist.Front()
 		if front == nil {
-			flock.Unlock()
+			SwapList()
 			continue
 		}
 		task := front.Value.(ReduceTask)
@@ -120,10 +121,15 @@ func flistExecute(flist *list.List, flock *sync.Mutex) {
 		} else {
 			flist.PushBack(task)
 		}
-		flock.Unlock()
 		args.Json = ""
 		res.Json = ""
 	}
+}
+
+func SwapList() {
+	fLock.Lock()
+	flists[0], flists[1] = flists[1], flists[0]
+	fLock.Unlock()
 }
 
 func mapExecute() {
@@ -170,11 +176,10 @@ func mapExecute() {
 			sum++
 			go func(rt ReduceTask) {
 				call("Coordinator.SumInc", &ags, &res)
-				flist := &flists[rt.I%flistlen]
-				flcok := &fLocks[rt.I%flistlen]
-				flcok.Lock()
+				flist := flists[1]
+				fLock.Lock()
 				flist.PushBack(rt)
-				flcok.Unlock()
+				fLock.Unlock()
 			}(reduceTask)
 			i = j
 		}

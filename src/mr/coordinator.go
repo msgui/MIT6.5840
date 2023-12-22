@@ -61,7 +61,7 @@ func (c *Coordinator) ReduceEsc(ags *Args, res *Result) error {
 	b := rt.Pid == reduceTask.Pid && rt.StartTime != -2
 	if b {
 		rt.StartTime = -2
-		c.Dec() //Count--*
+		c.Dec() //Count--
 	}
 	lock.Unlock()
 	res.Json = parse2Json(b)
@@ -243,7 +243,6 @@ func (c *Coordinator) server() {
 // main/mrmaster.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	//return false
 	count := &c.Count
 	timep := count.Timemap
 	isDone := count.Inc == count.Dec
