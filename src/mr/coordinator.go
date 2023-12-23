@@ -1,9 +1,9 @@
 package mr
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -15,9 +15,10 @@ import "net/http"
 type Coordinator struct {
 	// Your definitions here.
 	Sum         int
-	IsDone      bool
+	mapDone     bool
+	reduceDone  bool
 	Count       Count
-	Reduces     []ReduceTask
+	Reduces     []FileTask
 	FileTasks   []FileTask
 	FileLocks   []sync.Mutex
 	ReduceLocks []sync.Mutex
@@ -37,12 +38,19 @@ type Count struct {
 // an example RPC handler.
 //
 // the RPC argument and reply types are defined in rpc.go.
-func (c *Coordinator) SumInc(ags *Args, res *Result) error {
-	var add int
-	parse2Obj(ags.Json, &add)
-	c.Slock.Lock()
-	c.Sum++
-	c.Slock.Unlock()
+
+func (c *Coordinator) GetReduces(ags *Args, res *Result) error {
+	var i int
+	parse2Obj(ags.Json, &i)
+	res.Json = parse2Json(c.Reduces)
+	return nil
+}
+
+func (c *Coordinator) ReduceUnLock(ags *Args, res *Result) error {
+	var i int
+	parse2Obj(ags.Json, &i)
+	lock := &c.ReduceLocks[i]
+	lock.Unlock()
 	return nil
 }
 
@@ -58,10 +66,9 @@ func (c *Coordinator) ReduceEsc(ags *Args, res *Result) error {
 	lock := &c.ReduceLocks[i]
 	rt := &c.Reduces[i]
 	lock.Lock()
-	b := rt.Pid == reduceTask.Pid && rt.StartTime != -2
+	b := rt.Pid == reduceTask.Pid
 	if b {
-		rt.StartTime = -2
-		c.Dec() //Count--
+		rt.StartTime = -3
 	}
 	lock.Unlock()
 	res.Json = parse2Json(b)
@@ -92,32 +99,6 @@ func (c *Coordinator) ReduceFetch(ags *Args, res *Result) error {
 	return nil
 }
 
-func (c *Coordinator) MapPut(ags *Args, res *Result) error {
-	var reduceTask ReduceTask
-	parse2Obj(ags.Json, &reduceTask)
-	index := reduceTask.I % len(c.Reduces)
-	lock := &c.ReduceLocks[index]
-	task := &c.Reduces[index]
-
-	if task.StartTime != -2 || !lock.TryLock() {
-		res.Json = parse2Json(false)
-		return nil
-	}
-	if task.StartTime == -2 {
-		task.I = index
-		task.Pid = -1
-		task.Key = reduceTask.Key
-		task.Values = reduceTask.Values
-		task.StartTime = -1
-		c.Inc() //Count++
-		res.Json = parse2Json(true)
-	} else {
-		res.Json = parse2Json(false)
-	}
-	lock.Unlock()
-	return nil
-}
-
 func (c *Coordinator) MapFetch(ags *Args, res *Result) error {
 	var pid int
 	parse2Obj(ags.Json, &pid)
@@ -132,12 +113,7 @@ func (c *Coordinator) MapFetch(ags *Args, res *Result) error {
 				fileTask.I = i
 				fileTask.Pid = pid
 				fileTask.StartTime = time.Now().UnixNano()
-				bytes, err := json.Marshal(fileTask)
-				if err != nil {
-					lock.Unlock()
-					return err
-				}
-				res.Json = string(bytes)
+				res.Json = parse2Json(fileTask)
 				lock.Unlock()
 				break
 			}
@@ -147,8 +123,13 @@ func (c *Coordinator) MapFetch(ags *Args, res *Result) error {
 	return nil
 }
 
-func (c *Coordinator) DoneRPC(ags *Args, res *Result) error {
-	res.Json = parse2Json(c.IsDone)
+func (c *Coordinator) MapDone(ags *Args, res *Result) error {
+	res.Json = parse2Json(c.mapDone)
+	return nil
+}
+
+func (c *Coordinator) ReduceDone(ags *Args, res *Result) error {
+	res.Json = parse2Json(c.reduceDone)
 	return nil
 }
 
@@ -161,14 +142,49 @@ func (c *Coordinator) FinishFileTask(ags *Args, res *Result) error {
 	flock.Lock()
 	defer flock.Unlock()
 	if task.Pid != fileTask.Pid {
+		res.Json = parse2Json(false)
+		return nil
+	}
+	fileTask.StartTime = -3
+	res.Json = parse2Json(true)
+	return nil
+}
+
+func (c *Coordinator) FinishMap(ags *Args, res *Result) error {
+	var task FileTask
+	parse2Obj(ags.Json, &task)
+	fileIndex := task.I
+	fileTask := &c.FileTasks[fileIndex]
+	flock := &c.FileLocks[fileIndex]
+	flock.Lock()
+	defer flock.Unlock()
+	if task.Pid != fileTask.Pid {
+		res.Json = parse2Json(false)
 		return nil
 	}
 	fileTask.StartTime = -2
+	res.Json = parse2Json(true)
+	return nil
+}
+
+func (c *Coordinator) FinishReduce(ags *Args, res *Result) error {
+	var task FileTask
+	parse2Obj(ags.Json, &task)
+	fileIndex := task.I
+	fileTask := &c.Reduces[fileIndex]
+	flock := &c.ReduceLocks[fileIndex]
+	flock.Lock()
+	defer flock.Unlock()
+	if task.Pid != fileTask.Pid {
+		res.Json = parse2Json(false)
+		return nil
+	}
+	fileTask.StartTime = -2
+	res.Json = parse2Json(true)
 	return nil
 }
 
 /*
-*
 Timer
 */
 func (c *Coordinator) ReduceTimer() {
@@ -177,14 +193,14 @@ func (c *Coordinator) ReduceTimer() {
 			reduceTask := &c.Reduces[i]
 			lock := &c.ReduceLocks[i]
 			if timeOut(reduceTask.StartTime) {
-				go func() {
+				go func(reduceTask *FileTask, lock *sync.Mutex) {
 					lock.Lock()
 					if timeOut(reduceTask.StartTime) {
 						reduceTask.Pid = -1
 						reduceTask.StartTime = -1
 					}
 					lock.Unlock()
-				}()
+				}(reduceTask, lock)
 			}
 		}
 	}
@@ -196,12 +212,14 @@ func (c *Coordinator) MapTimer() {
 			fileTask := &c.FileTasks[i]
 			lock := &c.FileLocks[i]
 			if timeOut(fileTask.StartTime) {
-				go func() {
+				go func(fileTask *FileTask) {
 					lock.Lock()
-					fileTask.Pid = -1
-					fileTask.StartTime = -1
+					if fileTask.StartTime != -2 {
+						fileTask.Pid = -1
+						fileTask.StartTime = -1
+					}
 					lock.Unlock()
-				}()
+				}(fileTask)
 			}
 		}
 	}
@@ -243,20 +261,26 @@ func (c *Coordinator) server() {
 // main/mrmaster.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	count := &c.Count
-	timep := count.Timemap
-	isDone := count.Inc == count.Dec
-
-	for i := range c.FileTasks {
-		fileTask := &c.FileTasks[i]
-		isDone = isDone && fileTask.StartTime == -2
-		if !isDone {
+	fileTasks := &c.FileTasks
+	for _, fileTask := range *fileTasks {
+		if fileTask.StartTime != -3 {
 			return false
 		}
 	}
-	time.Sleep(100 * time.Millisecond)
-	isDone = c.Count.Timemap == timep
-	return isDone
+	c.mapDone = true
+	reduces := &c.Reduces
+	for _, reduceTask := range *reduces {
+		if reduceTask.StartTime != -3 {
+			return false
+		}
+	}
+	c.reduceDone = true
+	return true
+}
+
+func (c *Coordinator) DoneRPC(ags *Args, res *Result) error {
+	res.Json = parse2Json(c.reduceDone && c.mapDone)
+	return nil
 }
 
 func (c *Coordinator) PrintTimer() bool {
@@ -283,12 +307,13 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		}
 	}
 
-	reduceTasks := make([]ReduceTask, nReduce)
+	reduceTasks := make([]FileTask, nReduce)
 	for i := range reduceTasks {
-		reduceTasks[i] = ReduceTask{
+		reduceTasks[i] = FileTask{
 			I:         i,
 			Pid:       -1,
-			StartTime: -2,
+			FileName:  "reduce-" + strconv.Itoa(i) + ".txt",
+			StartTime: -1,
 		}
 	}
 
@@ -296,6 +321,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	fileLocks := make([]sync.Mutex, len(fileTasks))
 	m := Coordinator{
 		0,
+		false,
 		false,
 		Count{
 			Inc:     0,
@@ -305,8 +331,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		fileLocks, reduceLocks,
 		sync.Mutex{}, sync.Mutex{}, sync.Mutex{}}
 	m.server()
-	go m.ReduceTimer()
 	go m.MapTimer()
-	go m.PrintTimer()
+	go m.ReduceTimer()
 	return &m
 }

@@ -24,7 +24,6 @@ func main() {
 	for m.Done() == false {
 		time.Sleep(time.Second)
 	}
-	m.IsDone = true
 	time.Sleep(time.Second)
 	fmt.Printf("============= 总耗时 %ds =============\n", time.Now().Unix()-start)
 	fmt.Printf("================ Done ================\n")

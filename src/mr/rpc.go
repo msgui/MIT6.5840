@@ -35,11 +35,17 @@ type Args struct {
 	Json string
 }
 type ReduceTask struct {
-	I         int
-	Pid       int
-	Key       string
-	Values    []string
-	StartTime int64 // -2 代表 任务已完成，可以替换， -1代表任务未开始，等待被执行。>0代表 开始的时间辍
+	I      int
+	Pid    int
+	Key    string
+	Values []string
+	/*
+	   -3 代表 代表最终落盘任务完成， 任务已完成
+	   -2 代表 Reduce/Map任务已完成，接下来是落盘任务(为了避免超时)
+	   -1 代表 任务未开始，等待被执行
+	   >0 代表 任务其启动的时间辍 单位：纳秒
+	*/
+	StartTime int64
 }
 
 type FileTask struct {

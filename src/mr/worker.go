@@ -1,15 +1,12 @@
 package mr
 
 import (
-	"container/list"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"sort"
 	"strconv"
-	"sync"
-	"time"
 )
 import "log"
 import "net/rpc"
@@ -52,21 +49,9 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 	mapFunc = mapf
 	reduceFunc = reducef
-	//nReduce := getNReduce()
-	flistlen = 2
-	flists = make([]*list.List, flistlen)
-	flists[0] = list.New()
-	flists[1] = list.New()
-	fLock = sync.Mutex{}
-	go mapExecute()
-	go reduceExecute()
-	go flistExecute()
-
-	for Done() == false {
-		fmt.Printf("=== 发送成功: %d, 发送失败：%d, 任务总数 %d\n", done, sum-done, sum)
-		time.Sleep(time.Second)
-	}
-	fmt.Printf("=== 发送成功: %d, 发送失败：%d, 任务总数 %d\n", done, sum-done, sum)
+	nReduce = getNReduce()
+	mapExecute()
+	reduceExecute()
 	fmt.Println("================ Done ================")
 }
 
@@ -82,12 +67,7 @@ func Done() bool {
 	return done
 }
 
-var flistlen int
-var done int
-var sum int
-var dlock sync.Mutex = sync.Mutex{}
-var flists []*list.List
-var fLock sync.Mutex
+var nReduce int
 
 func getNReduce() int {
 	ags := Args{}
@@ -98,38 +78,35 @@ func getNReduce() int {
 	return n
 }
 
-func flistExecute() {
+func getReduceTasks() []FileTask {
 	args := Args{}
 	res := Result{}
 	for {
-		flist := flists[0]
-		front := flist.Front()
-		if front == nil {
-			SwapList()
-			continue
+		call("Coordinator.GetReduces", &args, &res)
+		if len(res.Json) > 0 {
+			var reduceTasks []FileTask
+			parse2Obj(res.Json, &reduceTasks)
+			return reduceTasks
 		}
-		task := front.Value.(ReduceTask)
-		args.Json = parse2Json(task)
-		flist.Remove(front)
-		call("Coordinator.MapPut", &args, &res)
-		var f bool
-		parse2Obj(res.Json, &f)
-		if f {
-			dlock.Lock()
-			done++
-			dlock.Unlock()
-		} else {
-			flist.PushBack(task)
-		}
-		args.Json = ""
-		res.Json = ""
 	}
 }
 
-func SwapList() {
-	fLock.Lock()
-	flists[0], flists[1] = flists[1], flists[0]
-	fLock.Unlock()
+func mapDone() bool {
+	res := Result{}
+	ags := Args{}
+	call("Coordinator.MapDone", &ags, &res)
+	var f bool
+	parse2Obj(res.Json, &f)
+	return f
+}
+
+func reduceDone() bool {
+	res := Result{}
+	ags := Args{}
+	call("Coordinator.ReduceDone", &ags, &res)
+	var f bool
+	parse2Obj(res.Json, &f)
+	return f
 }
 
 func mapExecute() {
@@ -137,7 +114,7 @@ func mapExecute() {
 	res := Result{}
 	ags := Args{}
 	pid := os.Getpid()
-	for {
+	for !mapDone() {
 		ags.Json = parse2Json(pid)
 		call("Coordinator.MapFetch", &ags, &res)
 		if len(res.Json) == 0 {
@@ -146,45 +123,31 @@ func mapExecute() {
 		var fileTask FileTask
 		parse2Obj(res.Json, &fileTask)
 		fileTask.Pid = pid
-		file, err := os.Open(fileTask.FileName)
-		if err != nil {
-			fmt.Errorf("FileName open error: %s", err)
-			break
-		}
+		file, _ := os.Open(fileTask.FileName)
 		content, _ := ioutil.ReadAll(file)
 		kva := mapFunc(fileTask.FileName, string(content))
-		sort.Sort(KeyValues(kva))
-		//fmt.Printf("%s \n", kva)
-		i := 0
-		for i < len(kva) {
-			kv := &kva[i]
-			j := i + 1
-			for j < len(kva) && kva[j].Key == kva[i].Key {
-				j++
-			}
-			values := []string{}
-			for k := i; k < j; k++ {
-				values = append(values, kva[k].Value)
-			}
-			reduceTask := ReduceTask{
-				I:         ihash(kv.Key),
-				Pid:       pid,
-				Key:       kv.Key,
-				Values:    values,
-				StartTime: -1,
-			}
-			sum++
-			go func(rt ReduceTask) {
-				call("Coordinator.SumInc", &ags, &res)
-				flist := flists[1]
-				fLock.Lock()
-				flist.PushBack(rt)
-				fLock.Unlock()
-			}(reduceTask)
-			i = j
-		}
 		ags.Json = parse2Json(fileTask)
-		call("Coordinator.FinishFileTask", &ags, &res)
+		var f bool
+		call("Coordinator.FinishMap", &ags, &res)
+		parse2Obj(res.Json, &f)
+		if f {
+			reduceTasks := getReduceTasks()
+			encoders := make([]*json.Encoder, len(reduceTasks))
+			files := make([]*os.File, len(reduceTasks))
+			for k, reduceTask := range reduceTasks {
+				outFile, _ := os.OpenFile(reduceTask.FileName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+				files[k] = outFile
+				encoders[k] = json.NewEncoder(outFile)
+			}
+			for _, kv := range kva {
+				index := ihash(kv.Key) % nReduce
+				encoders[index].Encode(&kv)
+			}
+			for _, file := range files {
+				file.Close()
+			}
+			call("Coordinator.FinishFileTask", &ags, &res)
+		}
 		res.Json = ""
 		ags.Json = ""
 		file.Close()
@@ -196,26 +159,57 @@ func reduceExecute() {
 	res := Result{}
 	ags := Args{}
 	pid := os.Getpid()
-	for {
+	for !reduceDone() {
 		ags.Json = parse2Json(pid)
 		call("Coordinator.ReduceFetch", &ags, &res)
 		if len(res.Json) == 0 {
-			fmt.Errorf("Coordinator.ReduceFetch后 res: %s", res)
 			continue
 		}
-		var reduceTask ReduceTask
+		var reduceTask FileTask
 		parse2Obj(res.Json, &reduceTask)
-		output := reduceFunc(reduceTask.Key, reduceTask.Values)
+		fileName := reduceTask.FileName
+		inFile, _ := os.OpenFile(fileName, os.O_RDONLY, 0644)
+		kva := make([]KeyValue, 0)
+		dec := json.NewDecoder(inFile)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			kva = append(kva, kv)
+		}
+		inFile.Close()
+		sort.Sort(KeyValues(kva))
+		outputs := make([]KeyValue, 0)
+		i := 0
+		for i < len(kva) {
+			kv := &kva[i]
+			j := i + 1
+			for j < len(kva) && kva[j].Key == kva[i].Key {
+				j++
+			}
+			values := []string{}
+			for k := i; k < j; k++ {
+				values = append(values, kva[k].Value)
+			}
+			outputs = append(outputs, KeyValue{
+				Key:   kv.Key,
+				Value: reduceFunc(kv.Key, values),
+			})
+			i = j
+		}
 		ags.Json = res.Json
-		call("Coordinator.ReduceEsc", &ags, &res)
+		call("Coordinator.FinishReduce", &ags, &res)
 		var f bool
 		parse2Obj(res.Json, &f)
 		if f {
 			oname := "mr-out-" + strconv.Itoa(reduceTask.I+1)
 			ofile, _ := os.OpenFile(oname, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
-			fmt.Fprintf(ofile, "%v %v\n", reduceTask.Key, output)
-		} else {
-			fmt.Errorf("Pid:%s 当前worker")
+			for _, output := range outputs {
+				fmt.Fprintf(ofile, "%v %v\n", output.Key, output.Value)
+			}
+			ofile.Close()
+			call("Coordinator.ReduceEsc", &ags, &res)
 		}
 		res.Json = ""
 		ags.Json = ""
