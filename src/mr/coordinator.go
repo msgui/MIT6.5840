@@ -275,6 +275,9 @@ func (c *Coordinator) Done() bool {
 		}
 	}
 	c.reduceDone = true
+	for _, reduceTask := range *reduces {
+		os.Remove(reduceTask.FileName)
+	}
 	return true
 }
 
