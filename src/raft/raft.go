@@ -18,7 +18,7 @@ package raft
 //
 
 import (
-	//	"bytes"
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -145,74 +145,36 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	term        int
-	candidateId int
+	Term        int
+	CandidateId int
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (2A).
-	term        int
-	voteGranted bool
+	Term        int
+	VoteGranted bool
 }
 
 type AppendEntriesArgs struct {
-	term         int
-	leaderId     int
-	preLogIndex  int
-	preLogTerm   int
-	entries      []LogEntry
-	leaderCommit int
+	Term         int
+	LeaderId     int
+	PreLogIndex  int
+	PreLogTerm   int
+	Entries      []LogEntry
+	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
-	term    int
-	success bool
+	Term    int
+	Success bool
 }
 
 type LogEntry struct {
 }
 
 // example RequestVote RPC handler.
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
-	if rf.status != Candidate {
-		if args.term > rf.currentTerm {
-			rf.mu.Lock()
-			if args.term > rf.currentTerm {
-				rf.status = Follower
-				rf.currentTerm = args.term
-				rf.votedFor = args.candidateId
-				reply.term = rf.currentTerm
-				reply.voteGranted = true
-				rf.mu.Unlock()
-				return
-			}
-			rf.mu.Unlock()
-		}
-	}
-	reply.term = rf.currentTerm
-	reply.voteGranted = false
-}
-
-func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.updateReceiveTime()
-	reply = &AppendEntriesReply{
-		term:    rf.currentTerm,
-		success: false,
-	}
-	if args.entries == nil {
-		reply.success = true
-		return
-	}
-}
-
-func (rf *Raft) updateReceiveTime() {
-	rf.mu.Lock()
-	rf.receiveTime = time.Now().UnixMilli()
-	rf.mu.Unlock()
-}
 
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
@@ -296,97 +258,163 @@ func (rf *Raft) ticker() {
 	for rf.killed() == false {
 		// Your code here (2A)
 		// Check if a leader election should be started.
-		if rf.status != Leader && rf.heartCheck() {
+		if rf.status != Leader && rf.timeOutCheck() {
 			rf.election()
 		}
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
+		ms := 50
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
-}
-
-func (rf *Raft) heartCheck() bool {
-	return time.Now().UnixMilli()-rf.receiveTime >= 1500*time.Millisecond.Milliseconds()
 }
 
 func (rf *Raft) heartbeat() {
 	for !rf.killed() {
 		if rf.status == Leader {
 			args := &AppendEntriesArgs{
-				term:         rf.currentTerm,
-				leaderId:     rf.me,
-				preLogIndex:  0,
-				preLogTerm:   0,
-				entries:      nil,
-				leaderCommit: 0,
+				Term:         rf.currentTerm,
+				LeaderId:     rf.me,
+				PreLogIndex:  0,
+				PreLogTerm:   0,
+				Entries:      nil,
+				LeaderCommit: 0,
 			}
-			for i := range rf.peers {
-				reply := &AppendEntriesReply{}
-				go func(i int) {
-					if rf.sendAppendEntries(i, args, reply) && !reply.success {
-						if reply.term > rf.currentTerm {
-							rf.mu.Lock()
-							rf.status = Follower
-							rf.mu.Unlock()
-						} else {
 
+			for i := range rf.peers {
+				if i == rf.me {
+					continue
+				}
+				go func(i int) {
+					reply := &AppendEntriesReply{}
+					if rf.sendAppendEntries(i, args, reply) && reply.Term > rf.currentTerm {
+						rf.mu.Lock()
+						defer rf.mu.Unlock()
+						if rf.status == Leader {
+							rf.status = Follower
+							rf.receiveTime = getNowTimeMilli()
+							fmt.Printf("当前term: %d, id: %d, Leader降级为Follwer\n", rf.currentTerm, rf.me)
 						}
+					} else {
+
 					}
 				}(i)
 			}
 		}
-		ms := 100 + (rand.Int63() % 51)
+		ms := 100 * len(rf.peers)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
 
+func getNowTimeMilli() int64 {
+	return time.Now().UnixMilli()
+}
+
 func (rf *Raft) election() {
 	rf.mu.Lock()
+	if !rf.timeOutCheck() {
+		return
+	}
 	rf.status = Candidate
 	rf.votedFor = rf.me
-	originTerm := rf.currentTerm
 	rf.currentTerm++
 	rf.mu.Unlock()
-
+	fmt.Printf("选举超时, Leader选举开始, id: %d, term: %d\n", rf.me, rf.currentTerm)
 	args := RequestVoteArgs{
-		term:        rf.currentTerm,
-		candidateId: rf.me,
+		Term:        rf.currentTerm,
+		CandidateId: rf.me,
 	}
 	votedForMe := 1
 	mutex := sync.Mutex{}
 	termCountMap := map[int]int{}
+	termCountMap[rf.currentTerm] = 1
+	wait := sync.WaitGroup{}
 
-	termCountMap[rf.currentTerm]++
 	for i := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+		wait.Add(1)
 		go func(i int) {
 			reply := RequestVoteReply{}
-			if !rf.sendRequestVote(i, &args, &reply) {
-				return
-			}
+			f := rf.sendRequestVote(i, &args, &reply)
 			mutex.Lock()
-			if reply.voteGranted {
-				votedForMe++
+			if f {
+				if reply.VoteGranted {
+					votedForMe++
+				}
+				termCountMap[reply.Term]++
 			}
-			termCountMap[reply.term]++
 			mutex.Unlock()
+			wait.Done()
 		}(i)
 	}
-
+	wait.Wait()
 	half := len(rf.peers) >> 1
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if votedForMe > half {
 		rf.status = Leader
+		fmt.Printf("Election, 当前term: %d, id: %d, 当选为Leader\n", rf.currentTerm, rf.me)
 	} else {
 		rf.status = Follower
-		newTerm := rf.getTermPassHalf(&termCountMap)
-		if newTerm != -1 {
+		fmt.Printf("Election, 当前term: %d, id: %d, 落选为Follower\n", rf.currentTerm, rf.me)
+		if newTerm := rf.getTermPassHalf(&termCountMap); newTerm != -1 {
 			rf.currentTerm = newTerm
-		} else {
-			rf.currentTerm = originTerm
 		}
 	}
-	rf.mu.Unlock()
+	rf.receiveTime = getNowTimeMilli()
+}
+
+func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	// Your code here (2A, 2B).
+	if args.Term > rf.currentTerm {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		if args.Term > rf.currentTerm {
+			rf.status = Follower
+			rf.currentTerm = args.Term
+			rf.votedFor = args.CandidateId
+			rf.receiveTime = getNowTimeMilli()
+			//rf.mu.Unlock()
+			fmt.Printf("RequestVote成功, 当前term: %d, id: %d, votedFor: %d, 当选Follower\n", rf.currentTerm, rf.me, rf.votedFor)
+			reply.Term = rf.currentTerm
+			reply.VoteGranted = true
+			return
+		}
+		rf.receiveTime = getNowTimeMilli()
+		//rf.mu.Unlock()
+	}
+	fmt.Printf("RequestVote失败, 当前term: %d, args.term: %d, id: %d, votedFor: %d\n", rf.currentTerm, args.Term, rf.me, rf.votedFor)
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = false
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.updateReceiveTime()
+	reply = &AppendEntriesReply{}
+	if args.Entries == nil {
+		reply.Success = args.Term >= rf.currentTerm
+		if args.Term > rf.currentTerm {
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			rf.status = Follower
+			rf.currentTerm = args.Term
+		}
+		reply.Term = rf.currentTerm
+		fmt.Printf("AppendEntries, currentTerm: %d, args.term: %d, id: %d, leader: %d\n", args.Term, rf.currentTerm, rf.me, args.LeaderId)
+		return
+	}
+}
+
+func (rf *Raft) updateReceiveTime() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.receiveTime = getNowTimeMilli()
+}
+
+func (rf *Raft) timeOutCheck() bool {
+	ms := (500 + (rand.Int63() % 900)) * time.Millisecond.Milliseconds()
+	return rf.receiveTime != -1 && getNowTimeMilli()-rf.receiveTime >= ms
 }
 
 func (rf *Raft) getTermPassHalf(mmap *map[int]int) int {
@@ -417,8 +445,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.status = Follower
-	rf.receiveTime = time.Now().UnixMilli()
-	rf.votedFor = -1
+	if rf.me == 0 {
+		rf.receiveTime = 0
+	} else {
+		rf.receiveTime = getNowTimeMilli()
+	}
+	rf.votedFor = 0
+	rf.currentTerm = 0
+	rf.mu = sync.Mutex{}
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
