@@ -206,17 +206,12 @@ type LogEntry struct {
 var ss int64 = getNowTimeMilli()
 
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := false
-	go func() {
-		ok = rf.peers[server].Call("Raft.RequestVote", args, reply)
-	}()
-	start := getNowTimeMilli()
-	for !ok {
-		if getNowTimeMilli()-start >= 500 {
-			return false
-		}
-	}
-	return true
+	//s := getNowTimeMilli()
+	//fmt.Printf("== id:%d Call开始 发向%d 时间:%d \n", rf.me, server, s-ss)
+	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	//start := getNowTimeMilli()
+	//fmt.Printf("== id:%d Call结束 发向%d %dms 时间:%d \n", rf.me, server, getNowTimeMilli()-s, start-ss)
+	return ok
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -226,7 +221,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	}()
 	start := getNowTimeMilli()
 	for !ok {
-		if getNowTimeMilli()-start >= 500 {
+		if getNowTimeMilli()-start >= 100 {
 			return false
 		}
 	}
@@ -279,11 +274,13 @@ func (rf *Raft) ticker() {
 		// Your code here (2A)
 		// Check if a leader election should be started.
 		if rf.status != Leader && rf.timeOutCheck() {
-			rf.election(rf.currentTerm)
+			if rf.election(rf.currentTerm) {
+				continue
+			}
 		}
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms := 50 + (rand.Int63() % 550)
+		ms := 120 + (rand.Int63() % 201)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
@@ -305,7 +302,7 @@ func (rf *Raft) heartbeat() {
 				}
 				go func(i int) {
 					reply := &AppendEntriesReply{}
-					if rf.sendAppendEntries(i, args, reply) && reply.Term > rf.currentTerm {
+					if rf.sendAppendEntries(i, args, reply) && reply.Term >= rf.currentTerm {
 						rf.mu.Lock()
 						if rf.status == Leader {
 							rf.status = Follower
@@ -318,7 +315,7 @@ func (rf *Raft) heartbeat() {
 				}(i)
 			}
 		}
-		ms := 100
+		ms := 30
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
@@ -327,15 +324,16 @@ func getNowTimeMilli() int64 {
 	return time.Now().UnixMilli()
 }
 
-func (rf *Raft) election(oldTerm int) {
+func (rf *Raft) election(oldTerm int) bool {
+	ret := false
 	rf.mu.Lock()
 	if oldTerm < rf.currentTerm {
 		rf.updateRecTimeAndUnLock()
-		return
+		return false
 	}
 	if !rf.timeOutCheck() {
 		rf.mu.Unlock()
-		return
+		return true
 	}
 	rf.status = Candidate
 	rf.votedFor = rf.me
@@ -344,16 +342,15 @@ func (rf *Raft) election(oldTerm int) {
 	rf.updateRecTime()
 	rf.mu.Unlock()
 
-	fmt.Printf("选举超时, Leader选举开始, id: %d, term: %d, 时间: %d\n", rf.me, currentTerm, getNowTimeMilli()-ss)
+	fmt.Printf("Election超时  , 当前term: %d, id: %d, 时间: %d\n", currentTerm, rf.me, getNowTimeMilli()-ss)
 	args := RequestVoteArgs{
 		Term:        currentTerm,
 		CandidateId: rf.me,
 	}
-	votedForMe := 1
-	wait := sync.WaitGroup{}
-	mutex := sync.Mutex{}
+	votedForMe := atomic.Int64{}
+	votedForMe.Add(1)
+	wait := atomic.Int64{}
 	maxTerm := currentTerm
-
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
@@ -362,34 +359,38 @@ func (rf *Raft) election(oldTerm int) {
 		go func(i int) {
 			reply := RequestVoteReply{}
 			rf.sendRequestVote(i, &args, &reply)
-			mutex.Lock()
 			if reply.VoteGranted {
-				votedForMe++
+				votedForMe.Add(1)
 			}
-			if maxTerm < reply.Term {
-				maxTerm = reply.Term
-			}
-			wait.Done()
-			mutex.Unlock()
+			wait.Add(-1)
 		}(i)
 	}
 
 	half := len(rf.peers) >> 1
-	wait.Wait()
+	for wait.Load() != 0 {
+		if int(votedForMe.Load()) > half {
+			fmt.Printf("Election跳出  , 当前term: %d, id: %d, 时间: %d\n", currentTerm, rf.me, getNowTimeMilli()-ss)
+			break
+		}
+		if rf.timeOutCheck() {
+			ret = true
+			break
+		}
+	}
 	if currentTerm != rf.currentTerm {
-		fmt.Printf("Election失败, 当前 id: %d, term: %d, 发现最新的时期号, 落选为Follower, 时间: %d\n", rf.me, currentTerm, getNowTimeMilli()-ss)
-		return
+		fmt.Printf("Election失败  , 当前term: %d, id: %d, 发现最新的时期号, 落选为Follower, 时间: %d\n", currentTerm, rf.me, getNowTimeMilli()-ss)
+		return ret
 	}
 	rf.mu.Lock()
 	defer rf.updateRecTimeAndUnLock()
-	if votedForMe > half {
+	if rf.currentTerm == maxTerm && int(votedForMe.Load()) > half {
 		rf.status = Leader
-		fmt.Printf("Election成功, 当前id: %d, term: %d, voteForme: %d, 当选为Leader, 时间: %d\n", rf.me, currentTerm, votedForMe, getNowTimeMilli()-ss)
+		fmt.Printf("Election成功  , 当前term: %d, id: %d, voteForme: %d, 当选为Leader, 时间: %d\n", currentTerm, rf.me, votedForMe.Load(), getNowTimeMilli()-ss)
 	} else {
 		rf.status = Follower
-		fmt.Printf("Election失败, 当前id: %d, term: %d, voteForme: %d, 落选为Follower, 时间: %d\n", rf.me, currentTerm, votedForMe, getNowTimeMilli()-ss)
-		rf.currentTerm = maxTerm
+		fmt.Printf("Election失败  , 当前term: %d, id: %d,voteForme: %d, 落选为Follower, 时间: %d\n", currentTerm, rf.me, votedForMe.Load(), getNowTimeMilli()-ss)
 	}
+	return ret
 }
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -397,11 +398,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.currentTerm {
 		rf.mu.Lock()
 		if args.Term > rf.currentTerm {
+			fmt.Printf("RequestVote成功, 当前term: %d, args.term: %d, id: %d, votedFor: %d, 当选Follower, 时间: %d\n",
+				rf.currentTerm, args.Term, rf.me, args.CandidateId, getNowTimeMilli()-ss)
 			rf.status = Follower
 			rf.currentTerm = args.Term
 			rf.votedFor = args.CandidateId
-			fmt.Printf("RequestVote成功, 当前term: %d, args.term: %d, id: %d, votedFor: %d, 当选Follower, 时间: %d\n",
-				rf.currentTerm, args.Term, rf.me, args.CandidateId, getNowTimeMilli()-ss)
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = true
 			rf.updateRecTimeAndUnLock()
@@ -421,8 +422,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Entries == nil {
 		reply.Success = args.Term >= rf.currentTerm
 		rf.mu.Lock()
-		if args.Term > rf.currentTerm {
-			fmt.Printf("AppendEntries成功, currentTerm: %d, args.term: %d, id: %d, leader: %d Leader降级至Follwer\n",
+		if reply.Success {
+			fmt.Printf("AppendEntries成功, currentTerm: %d, args.term: %d, id: %d, leader: %d \n",
 				rf.currentTerm, args.Term, rf.me, args.LeaderId)
 			rf.status = Follower
 			rf.currentTerm = args.Term
