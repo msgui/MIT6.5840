@@ -203,12 +203,14 @@ type LogEntry struct {
 // capitalized all field names in structs passed over RPC, and
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
+var ss int64 = getNowTimeMilli()
+
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := false
 	go func() {
 		ok = rf.peers[server].Call("Raft.RequestVote", args, reply)
 	}()
-	start := time.Now().UnixMilli()
+	start := getNowTimeMilli()
 	for !ok {
 		if getNowTimeMilli()-start >= 500 {
 			return false
@@ -219,10 +221,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := false
-	start := time.Now().UnixMilli()
 	go func() {
 		ok = rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	}()
+	start := getNowTimeMilli()
 	for !ok {
 		if getNowTimeMilli()-start >= 500 {
 			return false
@@ -281,8 +283,8 @@ func (rf *Raft) ticker() {
 		}
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		//ms := 50
-		//time.Sleep(time.Duration(ms) * time.Millisecond)
+		ms := 50 + (rand.Int63() % 550)
+		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
 
@@ -316,7 +318,7 @@ func (rf *Raft) heartbeat() {
 				}(i)
 			}
 		}
-		ms := 300
+		ms := 100
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
@@ -342,13 +344,13 @@ func (rf *Raft) election(oldTerm int) {
 	rf.updateRecTime()
 	rf.mu.Unlock()
 
-	fmt.Printf("选举超时, Leader选举开始, id: %d, term: %d\n", rf.me, currentTerm)
+	fmt.Printf("选举超时, Leader选举开始, id: %d, term: %d, 时间: %d\n", rf.me, currentTerm, getNowTimeMilli()-ss)
 	args := RequestVoteArgs{
 		Term:        currentTerm,
 		CandidateId: rf.me,
 	}
 	votedForMe := 1
-	wait := len(rf.peers) - 1
+	wait := sync.WaitGroup{}
 	mutex := sync.Mutex{}
 	maxTerm := currentTerm
 
@@ -356,59 +358,59 @@ func (rf *Raft) election(oldTerm int) {
 		if i == rf.me {
 			continue
 		}
+		wait.Add(1)
 		go func(i int) {
 			reply := RequestVoteReply{}
 			rf.sendRequestVote(i, &args, &reply)
 			mutex.Lock()
-			wait--
 			if reply.VoteGranted {
 				votedForMe++
 			}
 			if maxTerm < reply.Term {
 				maxTerm = reply.Term
 			}
+			wait.Done()
 			mutex.Unlock()
 		}(i)
 	}
 
 	half := len(rf.peers) >> 1
-	for wait != 0 {
-		if rf.timeOutCheck() {
-			return
-		}
-	}
+	wait.Wait()
 	if currentTerm != rf.currentTerm {
-		fmt.Printf("Election, 当前 id: %d, term: %d, 发现更新时期号, 落选为Follower\n", rf.me, currentTerm)
+		fmt.Printf("Election失败, 当前 id: %d, term: %d, 发现最新的时期号, 落选为Follower, 时间: %d\n", rf.me, currentTerm, getNowTimeMilli()-ss)
 		return
 	}
 	rf.mu.Lock()
 	defer rf.updateRecTimeAndUnLock()
 	if votedForMe > half {
 		rf.status = Leader
-		fmt.Printf("Election, 当前id: %d, term: %d, voteForme: %d, 当选为Leader\n", rf.me, currentTerm, votedForMe)
+		fmt.Printf("Election成功, 当前id: %d, term: %d, voteForme: %d, 当选为Leader, 时间: %d\n", rf.me, currentTerm, votedForMe, getNowTimeMilli()-ss)
 	} else {
 		rf.status = Follower
-		fmt.Printf("Election, 当前id: %d, term: %d, voteForme: %d, 落选为Follower\n", rf.me, currentTerm, votedForMe)
+		fmt.Printf("Election失败, 当前id: %d, term: %d, voteForme: %d, 落选为Follower, 时间: %d\n", rf.me, currentTerm, votedForMe, getNowTimeMilli()-ss)
 		rf.currentTerm = maxTerm
 	}
 }
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	rf.mu.Lock()
-	defer rf.updateRecTimeAndUnLock()
 	if args.Term > rf.currentTerm {
+		rf.mu.Lock()
 		if args.Term > rf.currentTerm {
 			rf.status = Follower
 			rf.currentTerm = args.Term
 			rf.votedFor = args.CandidateId
-			fmt.Printf("RequestVote成功, 当前term: %d, id: %d, votedFor: %d, 当选Follower\n", rf.currentTerm, rf.me, rf.votedFor)
+			fmt.Printf("RequestVote成功, 当前term: %d, args.term: %d, id: %d, votedFor: %d, 当选Follower, 时间: %d\n",
+				rf.currentTerm, args.Term, rf.me, args.CandidateId, getNowTimeMilli()-ss)
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = true
+			rf.updateRecTimeAndUnLock()
 			return
 		}
+		rf.updateRecTimeAndUnLock()
 	}
-	fmt.Printf("RequestVote失败, 当前term: %d, args.term: %d, id: %d, votedFor: %d\n", rf.currentTerm, args.Term, rf.me, rf.votedFor)
+	fmt.Printf("RequestVote失败, 当前term: %d, args.term: %d, id: %d, votedFor: %d, 时间: %d\n",
+		rf.currentTerm, args.Term, rf.me, args.CandidateId, getNowTimeMilli()-ss)
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
 }
@@ -419,14 +421,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Entries == nil {
 		reply.Success = args.Term >= rf.currentTerm
 		rf.mu.Lock()
-		defer rf.updateRecTimeAndUnLock()
 		if args.Term > rf.currentTerm {
-			fmt.Printf("AppendEntries, currentTerm: %d, args.term: %d, id: %d, leader: %d Leader降级至Follwer\n", rf.currentTerm, args.Term, rf.me, args.LeaderId)
+			fmt.Printf("AppendEntries成功, currentTerm: %d, args.term: %d, id: %d, leader: %d Leader降级至Follwer\n",
+				rf.currentTerm, args.Term, rf.me, args.LeaderId)
 			rf.status = Follower
 			rf.currentTerm = args.Term
+		} else {
+			fmt.Printf("AppendEntries失败, currentTerm: %d, args.term: %d, id: %d, leader: %d \n",
+				rf.currentTerm, args.Term, rf.me, args.LeaderId)
+			reply.Term = rf.currentTerm
 		}
-		reply.Term = rf.currentTerm
-		fmt.Printf("AppendEntries, currentTerm: %d, args.term: %d, id: %d, leader: %d \n", args.Term, rf.currentTerm, rf.me, args.LeaderId)
+		rf.updateRecTimeAndUnLock()
 	}
 }
 
@@ -440,7 +445,8 @@ func (rf *Raft) updateRecTime() {
 }
 
 func (rf *Raft) timeOutCheck() bool {
-	ms := int64(rf.me)*200 + 900 + rand.Int63()%500
+	// 1.0s
+	ms := time.Second.Milliseconds()
 	return getNowTimeMilli()-rf.receiveTime >= ms
 }
 
