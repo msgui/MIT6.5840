@@ -51,11 +51,11 @@ func TestInitialElection2A(t *testing.T) {
 }
 
 func TestMyself(t *testing.T) {
-	i := 100
+	i := 300
 	for i > 0 {
 		fmt.Printf("==========第%d次 TestMyself==========\n", 101-i)
-		//TestReElection2A(t)
-		//TestInitialElection2A(t)
+		TestReElection2A(t)
+		TestInitialElection2A(t)
 		TestManyElections2A(t)
 		i--
 	}
