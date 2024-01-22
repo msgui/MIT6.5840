@@ -403,7 +403,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.updateRecTimeAndUnLock()
 			return
 		}
-		rf.updateRecTimeAndUnLock()
+		rf.mu.Unlock()
 	}
 	fmt.Printf("RequestVote失败, 当前term: %d, args.term: %d, id: %d, votedFor: %d, 时间: %d\n",
 		rf.currentTerm, args.Term, rf.me, args.CandidateId, getNowTimeMilli()-ss)
@@ -412,7 +412,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.updateRecTime()
 	reply = &AppendEntriesReply{}
 	if args.Entries == nil {
 		reply.Success = args.Term >= rf.currentTerm
@@ -422,12 +421,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				rf.currentTerm, args.Term, rf.me, args.LeaderId)
 			rf.status = Follower
 			rf.currentTerm = args.Term
+			rf.updateRecTime()
 		} else {
 			fmt.Printf("AppendEntries失败, currentTerm: %d, args.term: %d, id: %d, leader: %d \n",
 				rf.currentTerm, args.Term, rf.me, args.LeaderId)
 			reply.Term = rf.currentTerm
 		}
-		rf.updateRecTimeAndUnLock()
+		rf.mu.Unlock()
 	}
 }
 

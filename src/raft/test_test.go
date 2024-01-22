@@ -52,7 +52,7 @@ func TestInitialElection2A(t *testing.T) {
 
 func TestMyself(t *testing.T) {
 	i := 1
-	for i <= 300 {
+	for i <= 100 {
 		fmt.Printf("==========第%d次 TestMyself==========\n", i)
 		//TestReElection2A(t)
 		//TestInitialElection2A(t)
