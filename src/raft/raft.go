@@ -206,26 +206,11 @@ type LogEntry struct {
 var ss int64 = getNowTimeMilli()
 
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	//s := getNowTimeMilli()
-	//fmt.Printf("== id:%d Call开始 发向%d 时间:%d \n", rf.me, server, s-ss)
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	//start := getNowTimeMilli()
-	//fmt.Printf("== id:%d Call结束 发向%d %dms 时间:%d \n", rf.me, server, getNowTimeMilli()-s, start-ss)
-	return ok
+	return rf.peers[server].Call("Raft.RequestVote", args, reply)
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := false
-	go func() {
-		ok = rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	}()
-	start := getNowTimeMilli()
-	for !ok {
-		if getNowTimeMilli()-start >= 100 {
-			return false
-		}
-	}
-	return true
+	return rf.peers[server].Call("Raft.AppendEntries", args, reply)
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -301,14 +286,24 @@ func (rf *Raft) heartbeat() {
 					continue
 				}
 				go func(i int) {
-					reply := &AppendEntriesReply{}
-					if rf.sendAppendEntries(i, args, reply) && reply.Term >= rf.currentTerm {
-						rf.mu.Lock()
+					reply := &AppendEntriesReply{
+						Term: -1,
+					}
+					if rf.status != Leader {
+						return
+					}
+					rf.sendAppendEntries(i, args, reply)
+					ok := reply.Term > 0
+					if ok && reply.Success == false {
 						if rf.status == Leader {
-							rf.status = Follower
-							fmt.Printf("当前id: %d, term: %d, Leader降级为Follwer\n", rf.me, rf.currentTerm)
+							rf.mu.Lock()
+							if rf.status == Leader {
+								rf.status = Follower
+								rf.updateRecTime()
+								fmt.Printf("当前id: %d, term: %d, Leader降级为Follwer\n", rf.me, rf.currentTerm)
+							}
+							rf.mu.Unlock()
 						}
-						rf.mu.Unlock()
 					} else {
 
 					}
