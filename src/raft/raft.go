@@ -356,6 +356,9 @@ func (rf *Raft) election(oldTerm int) bool {
 			rf.sendRequestVote(i, &args, &reply)
 			if reply.VoteGranted {
 				votedForMe.Add(1)
+				if reply.Term > maxTerm {
+					maxTerm = currentTerm
+				}
 			}
 			wait.Add(-1)
 		}(i)
@@ -363,7 +366,7 @@ func (rf *Raft) election(oldTerm int) bool {
 
 	half := len(rf.peers) >> 1
 	for wait.Load() != 0 {
-		if int(votedForMe.Load()) > half {
+		if maxTerm > currentTerm || int(votedForMe.Load()) > half {
 			fmt.Printf("Election跳出  , 当前term: %d, id: %d, 时间: %d\n", currentTerm, rf.me, getNowTimeMilli()-ss)
 			break
 		}
@@ -378,7 +381,7 @@ func (rf *Raft) election(oldTerm int) bool {
 	}
 	rf.mu.Lock()
 	defer rf.updateRecTimeAndUnLock()
-	if rf.currentTerm == maxTerm && int(votedForMe.Load()) > half {
+	if rf.currentTerm >= maxTerm && int(votedForMe.Load()) > half {
 		rf.status = Leader
 		fmt.Printf("Election成功  , 当前term: %d, id: %d, voteForme: %d, 当选为Leader, 时间: %d\n", currentTerm, rf.me, votedForMe.Load(), getNowTimeMilli()-ss)
 	} else {
